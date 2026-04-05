@@ -1,15 +1,22 @@
 import argparse
 import json
+import os
 import re
 import string
+import random
 from collections import Counter
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
+import numpy as np
 import torch
 from PIL import Image
+from peft import PeftModel
 from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
 
+import logging
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 def normalize_text(text: str) -> str:
     """Lowercase, strip punctuation, and normalize spaces."""
@@ -42,12 +49,30 @@ def exact_match(prediction: str, ground_truth: str) -> float:
     return float(normalize_text(prediction) == normalize_text(ground_truth))
 
 
+def set_reproducible(seed: int, deterministic: bool) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    if deterministic:
+        # Needed by some CUDA kernels for deterministic behavior.
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
+        torch.use_deterministic_algorithms(True, warn_only=True)
+
+
 def generate_answer(
     model: Qwen3VLForConditionalGeneration,
     processor: AutoProcessor,
     image_path: Path,
     question: str,
     max_new_tokens: int,
+    do_sample: bool,
+    temperature: float,
+    top_p: float,
 ) -> str:
     image = Image.open(image_path).convert("RGB")
     messages = [
@@ -69,7 +94,14 @@ def generate_answer(
     ).to(model.device)
 
     with torch.inference_mode():
-        generated_ids = model.generate(**inputs, max_new_tokens=max_new_tokens)
+        generated_ids = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=do_sample,
+            temperature=temperature if do_sample else None,
+            top_p=top_p if do_sample else None,
+            num_beams=1,
+        )
 
     generated_ids_trimmed = [
         out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
@@ -86,9 +118,17 @@ def evaluate(
     dataset_path: Path,
     images_dir: Path,
     model_id: str,
+    lora_adapter: Optional[Path],
     limit: int,
     max_new_tokens: int,
+    seed: int,
+    deterministic: bool,
+    do_sample: bool,
+    temperature: float,
+    top_p: float,
 ) -> Tuple[Dict, List[Dict]]:
+    set_reproducible(seed=seed, deterministic=deterministic)
+
     with dataset_path.open("r", encoding="utf-8") as f:
         data = json.load(f)
 
@@ -96,11 +136,19 @@ def evaluate(
         data = data[:limit]
 
     dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
-    model = Qwen3VLForConditionalGeneration.from_pretrained(
+    base_model = Qwen3VLForConditionalGeneration.from_pretrained(
         model_id,
         dtype=dtype,
         device_map="auto",
     )
+    base_model.eval()
+    if lora_adapter is not None:
+        model = PeftModel.from_pretrained(base_model, str(lora_adapter))
+        logger.info(f"Loaded LoRA adapter from {lora_adapter}")
+    else:
+        model = base_model
+        logger.info(f"Loaded base model from {model_id}")
+    model.eval()
     processor = AutoProcessor.from_pretrained(model_id)
 
     results: List[Dict] = []
@@ -131,6 +179,9 @@ def evaluate(
             image_path=image_path,
             question=question,
             max_new_tokens=max_new_tokens,
+            do_sample=do_sample,
+            temperature=temperature,
+            top_p=top_p,
         )
 
         f1 = token_f1(prediction, answer)
@@ -160,6 +211,12 @@ def evaluate(
         "dataset_path": str(dataset_path),
         "images_dir": str(images_dir),
         "model_id": model_id,
+        "lora_adapter": str(lora_adapter) if lora_adapter is not None else None,
+        "seed": seed,
+        "deterministic": deterministic,
+        "do_sample": do_sample,
+        "temperature": temperature if do_sample else None,
+        "top_p": top_p if do_sample else None,
         "total_examples_loaded": len(data),
         "evaluated_examples": evaluated,
         "skipped_missing_image": skipped_missing_image,
@@ -193,6 +250,12 @@ def parse_args() -> argparse.Namespace:
         help="Hugging Face model id.",
     )
     parser.add_argument(
+        "--lora-adapter",
+        type=Path,
+        default=None,
+        help="Optional path to a LoRA adapter directory/checkpoint to load for evaluation.",
+    )
+    parser.add_argument(
         "--limit",
         type=int,
         default=0,
@@ -203,6 +266,34 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=64,
         help="Maximum generated tokens per answer.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for reproducible evaluation.",
+    )
+    parser.add_argument(
+        "--deterministic",
+        action="store_true",
+        help="Enable stricter deterministic CUDA behavior.",
+    )
+    parser.add_argument(
+        "--do-sample",
+        action="store_true",
+        help="Enable sampling in generation (non-deterministic by design).",
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=0.2,
+        help="Sampling temperature (used only when --do-sample is set).",
+    )
+    parser.add_argument(
+        "--top-p",
+        type=float,
+        default=0.9,
+        help="Nucleus sampling p (used only when --do-sample is set).",
     )
     parser.add_argument(
         "--output-json",
@@ -219,8 +310,14 @@ def main() -> None:
         dataset_path=args.dataset,
         images_dir=args.images_dir,
         model_id=args.model_id,
+        lora_adapter=args.lora_adapter,
         limit=args.limit,
         max_new_tokens=args.max_new_tokens,
+        seed=args.seed,
+        deterministic=args.deterministic,
+        do_sample=args.do_sample,
+        temperature=args.temperature,
+        top_p=args.top_p,
     )
 
     report = {"summary": summary, "results": results}
