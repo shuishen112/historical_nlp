@@ -22,3 +22,10 @@ python3 download_mediastream_pdfs.py --years 1816
 ```bash
 python3 download_mediastream_pdfs.py --years 1816,1820-1825
 ```
+### Options
+```bash
+--paper-id — defaults to your URL’s ID
+--output-dir -- where PDFs are saved (default: mediastream_pdfs)
+--delay 0.5 -- pause between requests (be polite to the server)
+--no-skip-existing -- re-download files that already exist
+```
