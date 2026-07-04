@@ -1,0 +1,19 @@
+# Requirements for eval_base.py (VQA evaluation harness)
+# Verified working with the `ehr_llm` conda env.
+# transformers must be >= 4.57 for Qwen3-VL support.
+
+torch==2.12.0
+transformers==5.10.2
+tokenizers==0.22.2
+safetensors==0.8.0
+accelerate==1.13.0
+numpy==2.2.6
+Pillow==12.2.0
+
+# Optional: only needed to load LoRA adapters (--lora-adapter)
+peft==0.19.1
+
+# Optional: only needed for PDF input modes (--input-mode original_pdf / split_pdf).
+# Not required for the default image mode. Install one of the following:
+pypdfium2>=4.30.0
+# PyMuPDF>=1.24.0
