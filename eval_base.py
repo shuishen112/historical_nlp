@@ -586,6 +586,34 @@ def evaluate(
 
         print(f"[{evaluated}] F1={f1:.4f} EM={em:.4f} | image={image_name} | q={question}")
 
+    # Aggregate metrics per category_id.
+    per_category_id: Dict[str, Dict[str, Any]] = {}
+    for r in results:
+        cid = r.get("category_id") or "UNKNOWN"
+        bucket = per_category_id.setdefault(
+            cid,
+            {"category": r.get("category", ""), "count": 0,
+             "f1_sum": 0.0, "em_sum": 0.0, "precision_sum": 0.0, "recall_sum": 0.0},
+        )
+        bucket["count"] += 1
+        bucket["f1_sum"] += r["f1"]
+        bucket["em_sum"] += r["exact_match"]
+        bucket["precision_sum"] += r["precision"]
+        bucket["recall_sum"] += r["recall"]
+
+    category_id_summary: Dict[str, Dict[str, Any]] = {}
+    for cid in sorted(per_category_id):
+        b = per_category_id[cid]
+        n = b["count"]
+        category_id_summary[cid] = {
+            "category": b["category"],
+            "count": n,
+            "avg_f1": round(b["f1_sum"] / n, 4) if n else 0.0,
+            "avg_precision": round(b["precision_sum"] / n, 4) if n else 0.0,
+            "avg_recall": round(b["recall_sum"] / n, 4) if n else 0.0,
+            "avg_exact_match": round(b["em_sum"] / n, 4) if n else 0.0,
+        }
+
     summary = {
         "dataset_path": str(dataset_path),
         "images_dir": str(images_dir),
@@ -611,6 +639,7 @@ def evaluate(
         "avg_precision": precision_sum / evaluated if evaluated else 0.0,
         "avg_recall": recall_sum / evaluated if evaluated else 0.0,
         "avg_exact_match": em_sum / evaluated if evaluated else 0.0,
+        "per_category_id": category_id_summary,
     }
     return summary, results
 
@@ -733,6 +762,13 @@ def parse_args() -> argparse.Namespace:
         default=Path("eval_base_dutch_vqa.json"),
         help="Where to save detailed predictions + metrics.",
     )
+
+    parser.add_argument(
+        "--output-summary",
+        type=Path,
+        default=Path("eval_base_dutch_vqa_summary.csv"),
+        help="Where to save the summary of the evaluation.",
+    )
     return parser.parse_args()
 
 
@@ -764,14 +800,34 @@ def main() -> None:
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
+    per_category_id = summary.get("per_category_id", {})
+
     print("\n=== Evaluation Summary ===")
     for key, value in summary.items():
+        if key == "per_category_id":
+            continue
         if isinstance(value, float):
             print(f"{key}: {value:.4f}")
         else:
             print(f"{key}: {value}")
+
+    if per_category_id:
+        print("\n=== F1 by category_id ===")
+        header = f"{'category_id':<12} {'n':>4} {'F1':>8} {'EM':>8} {'category'}"
+        print(header)
+        print("-" * (len(header) + 8))
+        for cid, stats in per_category_id.items():
+            print(
+                f"{cid:<12} {stats['count']:>4} {stats['avg_f1']:>8.4f} "
+                f"{stats['avg_exact_match']:>8.4f} {stats['category']}"
+            )
+
     print(f"\nSaved detailed report to: {args.output_json}")
 
+    # save the results to a csv file
+    results_df = pd.DataFrame(results)
+    results_df.to_csv(args.output_summary, index=False)
+    print(f"Saved summary to: {args.output_summary}")
 
 if __name__ == "__main__":
     main()
