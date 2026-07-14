@@ -6,9 +6,10 @@ loading and prompt/input construction are isolated behind a small
 without touching the evaluation loop or the metric code.
 
 Currently supported ``--model-type`` values:
-  - ``auto``      : infer the handler from the model id (default)
-  - ``qwen3_vl``  : Qwen/Qwen3-VL-* Instruct models
-  - ``llava``     : llava-hf/llava-* and llava-next models
+  - ``auto``       : infer the handler from the model id (default)
+  - ``qwen2_5_vl`` : Qwen/Qwen2.5-VL-* Instruct models
+  - ``qwen3_vl``   : Qwen/Qwen3-VL-* Instruct models
+  - ``llava``      : llava-hf/llava-* and llava-next models
 """
 
 import argparse
@@ -247,6 +248,38 @@ class Qwen3VLHandler(VLMHandler):
         return dict(inputs)
 
 
+class Qwen2_5VLHandler(VLMHandler):
+    """Handler for Qwen2.5-VL Instruct models."""
+
+    def _model_loader(self) -> Any:
+        candidates = [
+            "Qwen2_5_VLForConditionalGeneration",
+            "AutoModelForImageTextToText",
+            "AutoModelForVision2Seq",
+            "AutoModelForCausalLM",
+            "AutoModel",
+        ]
+        for name in candidates:
+            loader = getattr(transformers, name, None)
+            if loader is not None:
+                logger.info(f"[qwen2_5_vl] Using transformers loader: {name}")
+                return loader
+        raise RuntimeError("No compatible AutoModel loader found for Qwen2.5-VL.")
+
+    def build_inputs(self, images: Sequence[Image.Image], question: str) -> Dict[str, Any]:
+        content: List[Dict] = [{"type": "image", "image": img} for img in images]
+        content.append({"type": "text", "text": question})
+        messages = [{"role": "user", "content": content}]
+        inputs = self.processor.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_dict=True,
+            return_tensors="pt",
+        )
+        return dict(inputs)
+
+
 class LlavaHandler(VLMHandler):
     """Handler for llava-hf LLaVA / LLaVA-NeXT models.
 
@@ -292,6 +325,7 @@ class LlavaHandler(VLMHandler):
 
 
 _HANDLER_REGISTRY = {
+    "qwen2_5_vl": Qwen2_5VLHandler,
     "qwen3_vl": Qwen3VLHandler,
     "llava": LlavaHandler,
 }
@@ -299,7 +333,9 @@ _HANDLER_REGISTRY = {
 
 def _infer_model_type(model_id: str) -> str:
     lowered = model_id.lower()
-    if "qwen" in lowered:
+    if "qwen2.5" in lowered or "qwen2_5" in lowered:
+        return "qwen2_5_vl"
+    if "qwen3" in lowered or "qwen" in lowered:
         return "qwen3_vl"
     if "llava" in lowered:
         return "llava"
@@ -701,7 +737,7 @@ def parse_args() -> argparse.Namespace:
         "--model-type",
         type=str,
         default="auto",
-        choices=["auto", "qwen3_vl", "llava"],
+        choices=["auto", "qwen2_5_vl", "qwen3_vl", "llava"],
         help="Which model handler to use. 'auto' infers from --model-id.",
     )
     parser.add_argument(
