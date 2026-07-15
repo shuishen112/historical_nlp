@@ -38,7 +38,7 @@ try:
     from peft import PeftModel
 except Exception:
     PeftModel = None
-
+import pandas as pd
 
 # ---------------------------------------------------------------------------
 # Metrics
